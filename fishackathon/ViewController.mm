@@ -11,6 +11,15 @@
 @interface ViewController ()
 
 @property (weak, nonatomic) IBOutlet UIImageView *imageView;
+@property (weak, nonatomic) IBOutlet UIButton *startStopButton;
+@property (weak, nonatomic) IBOutlet UILabel *label;
+@property (weak, nonatomic) IBOutlet UITextField *nameField;
+
+// [0 initial] [1 light] [2 dark]
+@property int lineState;
+@property bool recording;
+@property int clicks;
+@property (weak, nonatomic) NSTimer *timer;
 
 @end
 
@@ -19,20 +28,66 @@
 - (void)viewDidLoad {
     [super viewDidLoad];
     
-    NSArray *devices = [AVCaptureDevice devices];
+    [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(repeatableSetup)
+                                                 name:UIApplicationWillEnterForegroundNotification object:nil];
     
-    AVCaptureDevice *backCamera;
+    [[AVAudioSession sharedInstance] addObserver:self forKeyPath:@"outputVolume" options:NSKeyValueObservingOptionNew context:nil];
+
+    [self repeatableSetup];
+}
+
+- (void) repeatableSetup {
+    self.videoCamera = [[CvVideoCamera alloc] init];
+    self.videoCamera.defaultAVCaptureDevicePosition = AVCaptureDevicePositionBack;
+    self.videoCamera.defaultAVCaptureSessionPreset = AVCaptureSessionPreset640x480;
+    self.videoCamera.defaultAVCaptureVideoOrientation = AVCaptureVideoOrientationPortrait;
     
-    for (AVCaptureDevice *device in devices) {
-        if  ([device.localizedName isEqualToString: @"Back Camera"]) {
-            backCamera = device;
+    self.videoCamera.defaultFPS = 30;
+    self.videoCamera.grayscaleMode = YES;
+    self.videoCamera.delegate = self;
+    
+    [self.videoCamera start];
+    
+    [self.startStopButton setTitle:@"Stop" forState: UIControlStateSelected];
+    [self.startStopButton setTitle:@"Start" forState: UIControlStateNormal];
+    [self.nameField addTarget:self.nameField
+                       action:@selector(resignFirstResponder)
+             forControlEvents:UIControlEventEditingDidEndOnExit];
+    
+    [[AVAudioSession sharedInstance] setActive:YES error:nil];
+}
+
+- (void)dealloc {
+    [[NSNotificationCenter defaultCenter] removeObserver:self];
+    [[AVAudioSession sharedInstance] removeObserver:self forKeyPath:@"outputVolume"];
+}
+
+-(void)observeValueForKeyPath:(NSString *)keyPath ofObject:(id)object change:(NSDictionary *)change context:(void *)context{
+    if ([keyPath isEqualToString:@"outputVolume"]) {
+        [self clicked:nil];
+    }
+}
+
+- (IBAction)clicked:(id)sender {
+    self.recording = !self.recording;
+    
+    if (self.recording) {
+        self.clicks = 0;
+        self.lineState = 0;
+        [self.startStopButton setSelected:true];
+        [self.label setText: @"0 cm"];
+        [self turnFlashlight:YES];
+    } else {
+        [self.startStopButton setSelected:false];
+        [self.label setText: @"Not Measuring"];
+        [self turnFlashlight:NO];
+        
+        if (self.clicks > 0) {
+            [self recordFish:self.clicks];
         }
     }
     
-    if (backCamera) {
-        [self setupCaptureSession:backCamera];
-        [self captureNow:backCamera];
-    }
+    NSLog(@"Click: %d", self.recording ? 1 : 0);
 }
 
 - (void)didReceiveMemoryWarning {
@@ -40,170 +95,90 @@
     // Dispose of any resources that can be recreated.
 }
 
--(void) setupCaptureSession: (AVCaptureDevice *) device {
-    AVCaptureSession *session = [[AVCaptureSession alloc] init];
-    session.sessionPreset = AVCaptureSessionPresetMedium;
-    
-    AVCaptureVideoPreviewLayer *captureVideoPreviewLayer = [[AVCaptureVideoPreviewLayer    alloc] initWithSession:session];
-    [self.view.layer addSublayer:captureVideoPreviewLayer];
-    
-    NSError *error = nil;
-    AVCaptureDeviceInput *input = [AVCaptureDeviceInput deviceInputWithDevice:device error:&error];
-    if (!input) {
-        // Handle the error appropriately.
-        NSLog(@"ERROR: trying to open camera: %@", error);
-    }
-    [session addInput:input];
-    
-    self.stillImageOutput = [[AVCaptureStillImageOutput alloc] init];
-    NSDictionary *outputSettings = [[NSDictionary alloc] initWithObjectsAndKeys: AVVideoCodecJPEG, AVVideoCodecKey, nil];
-    [self.stillImageOutput setOutputSettings:outputSettings];
-    
-    [session addOutput:self.stillImageOutput];
-    
-    [session startRunning];
+- (void) didClick {
+    self.clicks++;
+    [[NSOperationQueue mainQueue] addOperationWithBlock:^{
+        [self.label setText: [NSString stringWithFormat: @"%d cm", self.clicks]];
+    }];
 }
 
--(void) captureNow: (AVCaptureDevice *) device {
-    dispatch_queue_t imageQueue = dispatch_queue_create("Image Queue",NULL);
+- (void) recordFish:(int) clicks {
+    NSLog(@"Record Fish Length: %d", clicks);
     
-    dispatch_async(imageQueue, ^{
-        AVCaptureConnection *videoConnection = nil;
-        for (AVCaptureConnection *connection in self.stillImageOutput.connections) {
-            for (AVCaptureInputPort *port in [connection inputPorts]) {
-                if ([[port mediaType] isEqual:AVMediaTypeVideo] ) {
-                    videoConnection = connection;
-                    break;
-                }
-            }
-            if (videoConnection) { break; }
+    [PFGeoPoint geoPointForCurrentLocationInBackground:^(PFGeoPoint *geoPoint, NSError *error) {
+        NSLog(@"Got Location %@", geoPoint);
+        PFObject *testObject = [PFObject objectWithClassName:@"FishRecord"];
+        testObject[@"length"] = @(clicks);
+        testObject[@"name"] = [self.nameField text];
+        
+        if (!error) {
+            NSLog(@"User is currently at %f, %f", geoPoint.latitude, geoPoint.longitude);
+            testObject[@"location"] = geoPoint;
         }
         
-        NSLog(@"about to request a capture from: %@", self.stillImageOutput);
-        __weak typeof(self) weakSelf = self;
-        
-        if ([device lockForConfiguration:nil]) {
-            [device setFocusMode:AVCaptureFocusModeContinuousAutoFocus];
-            [device setExposureMode:AVCaptureExposureModeContinuousAutoExposure];
-            [device setTorchMode:AVCaptureTorchModeOn];
-            [device setVideoZoomFactor: 1.6];
-            [device unlockForConfiguration];
-        }
-        
-        sleep(1);
-        
-        [self.stillImageOutput captureStillImageAsynchronouslyFromConnection:videoConnection completionHandler: ^(CMSampleBufferRef imageSampleBuffer, NSError *error) {
-            
-            NSData *imageData = [AVCaptureStillImageOutput jpegStillImageNSDataRepresentation:imageSampleBuffer];
-            UIImage *image = [[UIImage alloc] initWithData:imageData];
-            
-            [self processImage: image];
-            
-            [weakSelf.imageView setImage: image];
-            
-            if ([device lockForConfiguration:nil]) {
-                [device setTorchMode:AVCaptureTorchModeOff];
-                [device unlockForConfiguration];
-            }
-        }];
-    });
+        [testObject saveInBackground];
+    }];
 }
 
--(void) processImage: (UIImage *) image {
-    dispatch_queue_t processQueue = dispatch_queue_create("Process Queue",NULL);
-    
-    dispatch_async(processQueue, ^{
-        
-        CFDataRef pixelData = CGDataProviderCopyData(CGImageGetDataProvider(image.CGImage));
-        const UInt8* data = CFDataGetBytePtr(pixelData);
-        
-        NSLog(@"Start");
-        
-        CGPoint hotspot;
-        CGFloat hotspotBrightness = 0.0;
-        UIColor * hotspotColor;
-        
-        // Locate the hotspot where the flash reflects on the tape
-        for (int w = 0; w < image.size.width; w++) {
-            for (int h = 0; h < image.size.height; h++) {
-                UIColor * color = [self pixelColorInImage:image data:data atX:w atY:h];
-                
-                const CGFloat *components = CGColorGetComponents(color.CGColor);
-                
-                CGFloat R = components[0];
-                CGFloat G = components[1];
-                CGFloat B = components[2];
-                
-                CGFloat Y = (R+R+B+G+G+G)/6;
-                
-                if (Y > hotspotBrightness) {
-                    hotspot = CGPointMake(w, h);
-                    hotspotBrightness = Y;
-                    hotspotColor = color;
-                }
-            }
-        }
-        
-        // Get the 4 colors at 100 pixels up and 100 pixels down of the center
-        UIColor * a = [self pixelColorInImage:image data:data atX:(image.size.width / 2 - 100) atY:(image.size.height / 2 - 100)];
-        UIColor * b = [self pixelColorInImage:image data:data atX:(image.size.width / 2 - 100) atY:(image.size.height / 2 + 100)];
-        UIColor * c = [self pixelColorInImage:image data:data atX:(image.size.width / 2 + 100) atY:(image.size.height / 2 - 100)];
-        UIColor * d = [self pixelColorInImage:image data:data atX:(image.size.width / 2 + 100) atY:(image.size.height / 2 + 100)];
-        
-        NSArray * colors = @[a, b, c, d];
-        
-        CGFloat red   = [self average:colors pos:0];
-        CGFloat green = [self average:colors pos:1];
-        CGFloat blue  = [self average:colors pos:2];
-        
-        UIColor * averageColor = [UIColor colorWithRed:red
-                                                 green:green
-                                                 blue:blue
-                                                 alpha:1.0f];
-        
-        NSLog(@"%@", [self hexStringFromColor: averageColor]);
-        
-        CFRelease(pixelData);
-    });
-}
-
-- (UIColor*)pixelColorInImage:(UIImage*)image data:(const UInt8*)data atX:(int)x atY:(int)y {
-    int pixelInfo = ((image.size.width  * y) + x ) * 4; // 4 bytes per pixel
-    
-    UInt8 red   = data[pixelInfo + 0];
-    UInt8 green = data[pixelInfo + 1];
-    UInt8 blue  = data[pixelInfo + 2];
-    UInt8 alpha = data[pixelInfo + 3];
-    
-    return [UIColor colorWithRed:red/255.0f
-                           green:green/255.0f
-                            blue:blue/255.0f
-                           alpha:alpha/255.0f];
-}
-
-- (CGFloat) average:(NSArray*) colors pos:(int)pos {
-    CGFloat avg = 0.0;
-    
-    for (UIColor * color in colors) {
-        const CGFloat *components = CGColorGetComponents(color.CGColor);
-        
-        avg += components[pos];
+- (void)processImage:(cv::Mat &)image {
+    if (!self.recording) {
+        return;
     }
     
-    return avg / colors.count;
+    int Y = 0;
+    int avgCount = 0;
+    
+    for (int r = image.rows / 2 - 10; r <= image.rows / 2 + 10; r++) {
+        for (int c = image.cols / 2 - 10; c <= image.cols / 2 + 10; c++) {
+            cv::Vec3b yuvPixel = image.at<cv::Vec3b>(image.rows/2, image.cols/2);
+            Y += yuvPixel[0];
+            avgCount++;
+        }
+    }
+    
+    Y /= avgCount;
+    
+    NSLog(@"%d", Y);
+    
+    if (Y > 120) {
+        if (self.lineState == 2) { // It was dark now it's light
+            self.lineState = 1;
+            [self didClick];
+            NSLog(@"Now light: %d", self.clicks);
+        } else if(self.lineState == 0) {
+            self.lineState = 1;
+        }
+    } else if (Y < 80) {
+        if (self.lineState == 1) { // It was light now it's dark
+            self.lineState = 2;
+            [self didClick];
+            NSLog(@"Now dark: %d", self.clicks);
+        } else if(self.lineState == 0) {
+            self.lineState = 2;
+        }
+    }
 }
 
-- (NSString *)hexStringFromColor:(UIColor *)color {
-    const CGFloat *components = CGColorGetComponents(color.CGColor);
-    
-    CGFloat r = components[0];
-    CGFloat g = components[1];
-    CGFloat b = components[2];
-    
-    return [NSString stringWithFormat:@"#%02lX%02lX%02lX",
-            lroundf(r * 255),
-            lroundf(g * 255),
-            lroundf(b * 255)];
+- (void)turnFlashlight:(bool) on
+{
+    AVCaptureDevice * captDevice = [AVCaptureDevice defaultDeviceWithMediaType:AVMediaTypeVideo];
+    if ([captDevice hasFlash]&&[captDevice hasTorch]) {
+        [captDevice lockForConfiguration:nil];
+        [captDevice setTorchMode: (on ? AVCaptureTorchModeOn : AVCaptureTorchModeOff)];
+        [captDevice unlockForConfiguration];
+    }
+}
+
+- (IBAction)nameEditingBegin:(UITextView *)textView {
+    if ([textView.text isEqualToString:@"Name"]) {
+        textView.text = @"";
+    }
+}
+
+- (IBAction)nameEditingEnd:(UITextField *)textView {
+    if ([textView.text isEqualToString:@""]) {
+        textView.text = @"Name";
+    }
 }
 
 @end

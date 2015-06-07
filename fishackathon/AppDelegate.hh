@@ -7,6 +7,7 @@
 //
 
 #import <UIKit/UIKit.h>
+#import "SecretKeys.h"
 
 @interface AppDelegate : UIResponder <UIApplicationDelegate>
 

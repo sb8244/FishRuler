@@ -8,10 +8,11 @@
 #import <opencv2/opencv.hpp>
 #import <UIKit/UIKit.h>
 #import <AVFoundation/AVFoundation.h>
+#import <opencv2/highgui/cap_ios.h>
+#import <Parse/Parse.h>
 
-@interface ViewController : UIViewController
+@interface ViewController : UIViewController<CvVideoCameraDelegate>
 
-@property (strong, nonatomic) AVCaptureStillImageOutput* stillImageOutput;
+@property (nonatomic, retain) CvVideoCamera* videoCamera;
 
 @end
-
